@@ -2,9 +2,15 @@ beautifulsoup4
 pandas
 prefect
 requests
-dbt
+sqlalchemy
+dbt-core
+dbt-postgres
 black
+black[jupyter]
 flake8
 isort
 pytest
-
+openpyxl
+pyjanitor
+asyncio
+aiohttp

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Create a Conda environment
-conda create -y -n myenv python=3.8
+conda create -y -n myenv python=3.9
 
 # Activate the Conda environment
 conda activate myenv

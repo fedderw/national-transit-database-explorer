@@ -43,19 +43,36 @@ def scrape_monthly_ridership_url(url):
 
 
 @task
-def read_sheet_from_excel(
-    file_url,
-    sheet_name="UPT",
-):
-    # Read the 'UTP' sheet from the Excel file
-    print(f"Reading '{sheet_name}' sheet from '{file_url}'")
-    df = pd.read_excel(file_url, sheet_name=sheet_name)
+def read_excel_workbook(file_url, sheets=["UPT", "VRM", "VRH", "VOMS"]):
+    # Read the Excel file
+    print(f"Reading Excel file from '{file_url}'")
+    xl = pd.read_excel(file_url, sheet_name=sheets)
+    return xl
+
+
+def read_sheet_from_excel(xl, sheet_name="UPT", sheet_index=0):
+    # Read the sheet into a DataFrame
+    print(f"Reading '{sheet_name}' sheet")
+    df = xl[sheet_name]
     return df
 
 
-@task
-async def transform_data(df, value_name="Ridership"):
+def transform_data(df, value_name):
     print(f"Transforming data for '{value_name}'")
+    numeric_string_columns = [
+        "NTD ID",
+        "UZA",
+    ]
+    # Drop any rows with missing values for the numeric string columns
+    df.dropna(subset=numeric_string_columns, inplace=True)
+    # Convert the numeric columns to strings without decimal points
+    for col in numeric_string_columns:
+        df[col] = df[col].apply(lambda x: f"{int(x):05d}" if pd.notna(x) else x)
+
+    # Encode the 'Status', 'Reporter Type', 'Mode', and 'TOS' columns as categories
+    for col in ["Status", "Reporter Type", "Mode", "TOS"]:
+        df[col] = df[col].astype("category")
+
     # Reshape the data from wide to long format
     long_data = pd.melt(
         df,
@@ -83,7 +100,7 @@ async def transform_data(df, value_name="Ridership"):
     # Remove any leading/trailing whitespaces from the new columns
     long_data["Month"] = long_data["Month"].str.strip()
     long_data["Year"] = long_data["Year"].str.strip()
-    
+
     # Map the full values for 'Mode' column
     mode_mapping = {
         "AB": "Articulated Buses",
@@ -115,6 +132,38 @@ async def transform_data(df, value_name="Ridership"):
 
 
 @task
+def read_upt_sheet_from_excel(xl):
+    df = read_sheet_from_excel(xl, sheet_name="UPT", sheet_index=0)
+    transformed_data = transform_data(df, "UPT")
+    print(f"transformed_data.shape: {transformed_data.shape}")
+    return transformed_data
+
+
+@task
+def read_vrm_sheet_from_excel(xl):
+    df = read_sheet_from_excel(xl, sheet_name="VRM", sheet_index=1)
+    transformed_data = transform_data(df, "VRM")
+    print(f"transformed_data.shape: {transformed_data.shape}")
+    return transformed_data
+
+
+@task
+def read_vrh_sheet_from_excel(xl):
+    df = read_sheet_from_excel(xl, sheet_name="VRH", sheet_index=2)
+    transformed_data = transform_data(df, "VRH")
+    print(f"transformed_data.shape: {transformed_data.shape}")
+    return transformed_data
+
+
+@task
+def read_voms_sheet_from_excel(xl):
+    df = read_sheet_from_excel(xl, sheet_name="VOMS", sheet_index=3)
+    transformed_data = transform_data(df, "VOMS")
+    print(f"transformed_data.shape: {transformed_data.shape}")
+    return transformed_data
+
+
+@task
 def merge_transformed_data(dfs):
     id_vars = [
         "NTD ID",
@@ -129,22 +178,28 @@ def merge_transformed_data(dfs):
         "Month",
         "Year",
     ]
-    # Merge each DataFrame [upt, vrm, vrh, voms] in the list on the common columns. Each dataframe corresponds to a different measure of the transit system for a given month.
-    assert len(dfs) == 4
-    # dfs is a dictionary of dataframes
-    upt = dfs["UPT"]
-    vrm = dfs["VRM"]
-    vrh = dfs["VRH"]
-    voms = dfs["VOMS"]
-    # Merge the dataframes
+
     print("Merging data")
-    merged_df = upt.merge(vrm, on=id_vars, suffixes=("_upt", "_vrm"))
-    print(f"merged_df.shape: {merged_df.shape}")
-    merged_df = merged_df.merge(vrh, on=id_vars, suffixes=("_upt", "_vrh"))
-    print(f"merged_df.shape: {merged_df.shape}")
-    merged_df = merged_df.merge(voms, on=id_vars, suffixes=("_upt", "_voms"))
-    print(f"merged_df.shape: {merged_df.shape}")
+    merged_df = None
+
+    for name, df in dfs.items():
+        if merged_df is None:
+            merged_df = df.merge(df[id_vars + [name]], on=id_vars, how="left")
+        else:
+            merged_df = merged_df.merge(
+                df[id_vars + [name]], on=id_vars, how="left"
+            )
+
+        print(f"merged_df.shape: {merged_df.shape}")
+
     return merged_df
+
+
+@task
+def save_data_to_intermediate_file(df, sheet_name):
+    """Save the data to an intermediate CSV file"""
+    print("Saving data to intermediate file")
+    df.to_csv(f"data/{sheet_name}.csv", index=False)
 
 
 @task
@@ -158,8 +213,7 @@ def save_data_to_database(df):
 
     # Create table with more informative column names
     print("Creating MonthlyData table")
-    cursor.execute(
-        """
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS MonthlyData (
             NTD_ID TEXT,
             Legacy_NTD_ID TEXT,
@@ -175,17 +229,16 @@ def save_data_to_database(df):
             Unlinked_Passenger_Trips REAL,
             Vehicle_Revenue_Miles REAL,
             Vehicle_Revenue_Hours REAL,
-            Peak_Vehicles REAL
+            Peak_Vehicles REAL,
             PRIMARY KEY (NTD_ID, Legacy_NTD_ID, Agency, Status, Reporter_Type, UZA, UZA_Name, Mode, Type_Of_Service, Month, Year)
         );
+    """)
 
-    """
-    )
-    # Insert records into the Ridership table
+    # Insert records into the MonthlyData table
     records = df.to_records(index=False)
     print("Inserting records into the MonthlyData table")
     cursor.executemany(
-        "INSERT INTO Ridership VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO MonthlyData VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         records,
     )
 
@@ -204,12 +257,17 @@ url = "https://www.transit.dot.gov/ntd/data-product/monthly-module-adjusted-data
 @Flow
 def flow():
     file_url, file_name, month_year = scrape_monthly_ridership_url(url)
+    print(f"file_url: {file_url}")
+    print(f"file_name: {file_name}")
+    print(f"month_year: {month_year}")
     dfs = {}
-    for sheet_name in ["UPT", "VRM", "VRH", "VOMS"]:
-        df = read_sheet_from_excel(file_url, sheet_name)
-        transformed_data = transform_data(df, value_name=sheet_name)
-        print(f"transformed_data.shape: {transformed_data.shape}")
-        dfs[sheet_name] = transformed_data
+    xl = read_excel_workbook(file_url)
+    dfs["UPT"] = read_upt_sheet_from_excel(xl)
+    dfs["VRM"] = read_vrm_sheet_from_excel(xl)
+    dfs["VRH"] = read_vrh_sheet_from_excel(xl)
+    dfs["VOMS"] = read_voms_sheet_from_excel(xl)
+    # Save the data to an intermediate CSV file
+    [save_data_to_intermediate_file(dfs[key], key) for key in dfs.keys()]
     merged_data = merge_transformed_data(dfs)
     save_data_to_database(merged_data)
 

@@ -1,79 +1,57 @@
 import requests
 from bs4 import BeautifulSoup
 import re
-from prefect import task, Flow
 import pandas as pd
 import sqlite3
-from pprint import pprint as print
-import asyncio
-import aiohttp
+import os
+from tempfile import TemporaryDirectory
+from prefect import task, Flow
 
 
 @task
 def scrape_monthly_ridership_url(url):
-    # Send a GET request to the URL
     response = requests.get(url)
-
-    # Parse the HTML content
     soup = BeautifulSoup(response.content, "html.parser")
-
-    # Find the <a> tag containing the link to the .xlsx file
     link_tag = soup.find(
         "a", {"href": lambda href: href and href.endswith(".xlsx")}
     )
-
-    # Extract the href attribute (file URL) and text (file name)
-    # "https://www.transit.dot.gov/sites/fta.dot.gov/files/2023-05/March%202023%20Complete%20Monthly%20Ridership%20%28with%20adjustments%20and%20estimates%29.xlsx"
     file_relative_url = link_tag["href"]
-    print(f"URL found: {file_relative_url}")
     file_absolute_url = "https://www.transit.dot.gov/" + file_relative_url
-    print(file_absolute_url)
     file_name = link_tag.get_text(strip=True)
-    # Extract the month and year from the file name
     pattern = r"(\w+ \d{4})"
     match = re.search(pattern, file_name)
-    if match:
-        month_year = match.group(1)
-    else:
-        month_year = ""
-    print(f"file_name: {file_name}")
-    print(f"month_year: {month_year}")
-
+    month_year = match.group(1) if match else ""
     return file_absolute_url, file_name, month_year
 
 
 @task
-def read_excel_workbook(file_url, sheets=["UPT", "VRM", "VRH", "VOMS"]):
-    # Read the Excel file
-    print(f"Reading Excel file from '{file_url}'")
-    xl = pd.read_excel(file_url, sheet_name=sheets)
+def download_excel_workbook(file_url, output_dir):
+    response = requests.get(file_url)
+    file_path = os.path.join(output_dir, "ntd.xlsx")
+    with open(file_path, "wb") as f:
+        f.write(response.content)
+    return file_path
+
+
+@task
+def read_excel_workbook(file_path, sheets=["UPT", "VRM", "VRH", "VOMS"]):
+    xl = pd.read_excel(file_path, sheet_name=sheets)
     return xl
 
 
 def read_sheet_from_excel(xl, sheet_name="UPT", sheet_index=0):
-    # Read the sheet into a DataFrame
-    print(f"Reading '{sheet_name}' sheet")
     df = xl[sheet_name]
     return df
 
 
 def transform_data(df, value_name):
-    print(f"Transforming data for '{value_name}'")
-    numeric_string_columns = [
-        "NTD ID",
-        "UZA",
-    ]
-    # Drop any rows with missing values for the numeric string columns
-    df.dropna(subset=numeric_string_columns, inplace=True)
-    # Convert the numeric columns to strings without decimal points
-    for col in numeric_string_columns:
-        df[col] = df[col].apply(lambda x: f"{int(x):05d}" if pd.notna(x) else x)
-
-    # Encode the 'Status', 'Reporter Type', 'Mode', and 'TOS' columns as categories
-    for col in ["Status", "Reporter Type", "Mode", "TOS"]:
-        df[col] = df[col].astype("category")
-
-    # Reshape the data from wide to long format
+    numeric_string_columns = ["NTD ID", "UZA"]
+    df = df.dropna(subset=numeric_string_columns)
+    df[numeric_string_columns] = (
+        df[numeric_string_columns].astype(int).applymap("{:05d}".format)
+    )
+    categorical_columns = ["Status", "Reporter Type", "Mode", "TOS"]
+    df[categorical_columns] = df[categorical_columns].astype("category")
     long_data = pd.melt(
         df,
         id_vars=[
@@ -90,18 +68,18 @@ def transform_data(df, value_name):
         var_name="Month/Year",
         value_name=value_name,
     )
-
-    # Separate the "Month/Year" column into "Month" and "Year" columns
     long_data[["Month", "Year"]] = long_data["Month/Year"].str.split(
         "/", expand=True
     )
-    # Drop the "Month/Year" column
-    long_data.drop(columns="Month/Year", inplace=True)
-    # Remove any leading/trailing whitespaces from the new columns
-    long_data["Month"] = long_data["Month"].str.strip()
-    long_data["Year"] = long_data["Year"].str.strip()
+    long_data = long_data.drop(columns="Month/Year")
+    long_data[["Month", "Year"]] = long_data[["Month", "Year"]].apply(
+        lambda x: x.str.strip()
+    )
+    # Move value_name column to the end of the dataframe
+    cols = list(long_data.columns.values)
+    cols.pop(cols.index(value_name))
+    long_data = long_data[cols + [value_name]]
 
-    # Map the full values for 'Mode' column
     mode_mapping = {
         "AB": "Articulated Buses",
         "AO": "Automobiles",
@@ -123,43 +101,15 @@ def transform_data(df, value_name):
         "PT": "Paratransit",
     }
     long_data["Mode"] = long_data["Mode"].map(mode_mapping)
-
-    # Map the full values for 'TOS' column
     tos_mapping = {"DO": "Direct Operations", "PT": "Purchased Transportation"}
     long_data["TOS"] = long_data["TOS"].map(tos_mapping)
-
     return long_data
 
 
 @task
-def read_upt_sheet_from_excel(xl):
-    df = read_sheet_from_excel(xl, sheet_name="UPT", sheet_index=0)
-    transformed_data = transform_data(df, "UPT")
-    print(f"transformed_data.shape: {transformed_data.shape}")
-    return transformed_data
-
-
-@task
-def read_vrm_sheet_from_excel(xl):
-    df = read_sheet_from_excel(xl, sheet_name="VRM", sheet_index=1)
-    transformed_data = transform_data(df, "VRM")
-    print(f"transformed_data.shape: {transformed_data.shape}")
-    return transformed_data
-
-
-@task
-def read_vrh_sheet_from_excel(xl):
-    df = read_sheet_from_excel(xl, sheet_name="VRH", sheet_index=2)
-    transformed_data = transform_data(df, "VRH")
-    print(f"transformed_data.shape: {transformed_data.shape}")
-    return transformed_data
-
-
-@task
-def read_voms_sheet_from_excel(xl):
-    df = read_sheet_from_excel(xl, sheet_name="VOMS", sheet_index=3)
-    transformed_data = transform_data(df, "VOMS")
-    print(f"transformed_data.shape: {transformed_data.shape}")
+def read_sheet_and_transform(xl, sheet_name, value_name):
+    df = read_sheet_from_excel(xl, sheet_name)
+    transformed_data = transform_data(df, value_name)
     return transformed_data
 
 
@@ -178,43 +128,29 @@ def merge_transformed_data(dfs):
         "Month",
         "Year",
     ]
-
-    print("Merging data")
+    sheets = ["UPT", "VRM", "VRH", "VOMS"]
     merged_df = None
-
-    for name, df in dfs.items():
+    for df in dfs:
         if merged_df is None:
-            merged_df = df.merge(df[id_vars + [name]], on=id_vars, how="left")
+            merged_df = df
         else:
-            merged_df = merged_df.merge(
-                df[id_vars + [name]], on=id_vars, how="left"
-            )
-
-        print(f"merged_df.shape: {merged_df.shape}")
-
+            merged_df = merged_df.merge(df, on=id_vars, how="left")
     return merged_df
 
 
 @task
-def save_data_to_intermediate_file(df, sheet_name):
-    """Save the data to an intermediate CSV file"""
-    print("Saving data to intermediate file")
-    df.to_csv(f"data/{sheet_name}.csv", index=False)
+def save_data_to_intermediate_file(df, sheet_name, output_dir):
+    output_path = os.path.join(output_dir, f"{sheet_name}.parquet")
+    df.to_parquet(output_path, index=False)
 
 
 @task
-def save_data_to_database(df):
-    """Save the data to a SQLite database"""
-    # Connect to the SQLite database
-    print("Connecting to the database")
-    conn = sqlite3.connect("data/ntd.db")
-    print("Connected to the database")
+def save_data_to_database(df, db_path):
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-
-    # Create table with more informative column names
-    print("Creating MonthlyData table")
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS MonthlyData (
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS AgencyModeMonth (
             NTD_ID TEXT,
             Legacy_NTD_ID TEXT,
             Agency TEXT,
@@ -232,45 +168,50 @@ def save_data_to_database(df):
             Peak_Vehicles REAL,
             PRIMARY KEY (NTD_ID, Legacy_NTD_ID, Agency, Status, Reporter_Type, UZA, UZA_Name, Mode, Type_Of_Service, Month, Year)
         );
-    """)
+    """
+    )
+    # Update the table if
 
-    # Insert records into the MonthlyData table
+    # records
     records = df.to_records(index=False)
-    print("Inserting records into the MonthlyData table")
     cursor.executemany(
-        "INSERT INTO MonthlyData VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO AgencyModeMonth VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
         records,
     )
-
-    # Commit the changes and close the connection
-    print("Committing changes and closing the connection")
     conn.commit()
     conn.close()
-    print("Done")
 
 
-# URL to scrape
-url = "https://www.transit.dot.gov/ntd/data-product/monthly-module-adjusted-data-release"
+# Create a temporary directory for intermediate files
+with TemporaryDirectory() as temp_dir:
+    # Create subflow for scraping/downloading data
+    @Flow
+    def scrape_download_flow(url):
+        # Scrape URL
+        file_url, file_name, month_year = scrape_monthly_ridership_url(url)
+        # Download and save Excel workbook
+        file_path = download_excel_workbook(file_url, temp_dir)
+        return file_path
 
+    # Create subflow for transforming, merging, and uploading data
+    @Flow
+    def transform_merge_upload_flow(file_path):
+        # Read Excel workbook
+        xl = read_excel_workbook(file_path)
+        # Transform and merge data
+        dfs = []
+        for sheet_name in ["UPT", "VRM", "VRH", "VOMS"]:
+            df = read_sheet_and_transform(xl, sheet_name, sheet_name)
+            dfs.append(df)
+            save_data_to_intermediate_file(df, sheet_name, temp_dir)
 
-# Create a Prefect Flow
-@Flow
-def flow():
-    file_url, file_name, month_year = scrape_monthly_ridership_url(url)
-    print(f"file_url: {file_url}")
-    print(f"file_name: {file_name}")
-    print(f"month_year: {month_year}")
-    dfs = {}
-    xl = read_excel_workbook(file_url)
-    dfs["UPT"] = read_upt_sheet_from_excel(xl)
-    dfs["VRM"] = read_vrm_sheet_from_excel(xl)
-    dfs["VRH"] = read_vrh_sheet_from_excel(xl)
-    dfs["VOMS"] = read_voms_sheet_from_excel(xl)
-    # Save the data to an intermediate CSV file
-    [save_data_to_intermediate_file(dfs[key], key) for key in dfs.keys()]
-    merged_data = merge_transformed_data(dfs)
-    save_data_to_database(merged_data)
+        merged_df = merge_transformed_data(dfs)
 
+        # Upload merged data to database
+        save_data_to_database(merged_df, "data/ntd.db")
 
-# Run the flow
-flow()
+    # Run both subflows
+    file_path = scrape_download_flow(
+        url="https://www.transit.dot.gov/ntd/data-product/monthly-module-adjusted-data-release"
+    )
+    transform_merge_upload_flow(file_path)

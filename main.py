@@ -1,11 +1,23 @@
+import os
+import re
+import sqlite3
+import yaml
+from tempfile import TemporaryDirectory
+
+import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-import re
-import pandas as pd
-import sqlite3
-import os
-from tempfile import TemporaryDirectory
-from prefect import task, Flow
+from prefect import Flow, task
+from sqlalchemy import create_engine, Column, Integer, String, Float, Enum
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+import janitor
+from tqdm import tqdm
+import math
+
+# Load the configurations from YAML file
+with open("conf/main.yaml") as file:
+    conf = yaml.safe_load(file)
 
 
 @task
@@ -16,7 +28,7 @@ def scrape_monthly_ridership_url(url):
         "a", {"href": lambda href: href and href.endswith(".xlsx")}
     )
     file_relative_url = link_tag["href"]
-    file_absolute_url = "https://www.transit.dot.gov/" + file_relative_url
+    file_absolute_url = conf["DOT_BASE_URL"] + file_relative_url
     file_name = link_tag.get_text(strip=True)
     pattern = r"(\w+ \d{4})"
     match = re.search(pattern, file_name)
@@ -27,52 +39,45 @@ def scrape_monthly_ridership_url(url):
 @task
 def download_excel_workbook(file_url, output_dir):
     response = requests.get(file_url)
-    file_path = os.path.join(output_dir, "ntd.xlsx")
+    file_path = os.path.join(output_dir, conf["WB_OUTPUT_NAME"])
     with open(file_path, "wb") as f:
         f.write(response.content)
     return file_path
 
 
 @task
-def read_excel_workbook(file_path, sheets=["UPT", "VRM", "VRH", "VOMS"]):
+def read_excel_workbook(file_path, sheets=conf["SHEETS"]):
     xl = pd.read_excel(file_path, sheet_name=sheets)
     return xl
 
 
-def read_sheet_from_excel(xl, sheet_name="UPT", sheet_index=0):
-    df = xl[sheet_name]
+def read_sheet_from_excel(
+    xl, sheet_name=conf["SHEET_NAME_UPT"], sheet_index=0
+):
+    df = xl[sheet_name].clean_names()
     return df
 
 
 def transform_data(df, value_name):
-    numeric_string_columns = ["NTD ID", "UZA"]
+    # Use the conf instead of hardcoding the columns
+    numeric_string_columns = conf["NUMERIC_STRING_COLUMNS"]
     df = df.dropna(subset=numeric_string_columns)
     df[numeric_string_columns] = (
         df[numeric_string_columns].astype(int).applymap("{:05d}".format)
     )
-    categorical_columns = ["Status", "Reporter Type", "Mode", "TOS"]
+    categorical_columns = conf["CATEGORICAL_COLUMNS"]
     df[categorical_columns] = df[categorical_columns].astype("category")
     long_data = pd.melt(
         df,
-        id_vars=[
-            "NTD ID",
-            "Legacy NTD ID",
-            "Agency",
-            "Status",
-            "Reporter Type",
-            "UZA",
-            "UZA Name",
-            "Mode",
-            "TOS",
-        ],
+        id_vars=conf["ID_COLUMNS_MELT"],
         var_name="Month/Year",
         value_name=value_name,
     )
-    long_data[["Month", "Year"]] = long_data["Month/Year"].str.split(
-        "/", expand=True
+    long_data[["month", "year"]] = long_data["Month/Year"].str.split(
+        "_", expand=True
     )
     long_data = long_data.drop(columns="Month/Year")
-    long_data[["Month", "Year"]] = long_data[["Month", "Year"]].apply(
+    long_data[["month", "year"]] = long_data[["month", "year"]].apply(
         lambda x: x.str.strip()
     )
     # Move value_name column to the end of the dataframe
@@ -80,29 +85,14 @@ def transform_data(df, value_name):
     cols.pop(cols.index(value_name))
     long_data = long_data[cols + [value_name]]
 
-    mode_mapping = {
-        "AB": "Articulated Buses",
-        "AO": "Automobiles",
-        "AR": "Alaska Railroad",
-        "BR": "Over-the-Road Buses",
-        "BU": "Buses",
-        "CC": "Cable Car",
-        "MB": "Bus",
-        "RB": "Bus Rapid Transit",
-        "TR": "Aerial Tramway",
-        "CR": "Commuter Rail",
-        "LR": "Light Rail",
-        "HR": "Heavy Rail",
-        "DR": "Demand Response",
-        "FB": "Ferryboat",
-        "VP": "Vanpool",
-        "EB": "Trolleybus or Electric Bus",
-        "MO": "Monorail",
-        "PT": "Paratransit",
-    }
-    long_data["Mode"] = long_data["Mode"].map(mode_mapping)
-    tos_mapping = {"DO": "Direct Operations", "PT": "Purchased Transportation"}
-    long_data["TOS"] = long_data["TOS"].map(tos_mapping)
+    long_data["mode"] = long_data["mode"].map(conf["MODE_MAPPING"])
+    # Fill the missing values with "Unknown" for mode
+    long_data["mode"] = long_data["mode"].fillna("Unknown")
+    long_data["tos"] = long_data["tos"].map(conf["TOS_MAPPING"])
+    # Fill the missing values with "Unknown" for type of service
+    long_data["tos"] = long_data["tos"].fillna("Unknown")
+    # Fill the missing values with "" for legacy ntd id
+    long_data["legacy_ntd_id"] = long_data["legacy_ntd_id"].fillna("")
     return long_data
 
 
@@ -115,20 +105,8 @@ def read_sheet_and_transform(xl, sheet_name, value_name):
 
 @task
 def merge_transformed_data(dfs):
-    id_vars = [
-        "NTD ID",
-        "Legacy NTD ID",
-        "Agency",
-        "Status",
-        "Reporter Type",
-        "UZA",
-        "UZA Name",
-        "Mode",
-        "TOS",
-        "Month",
-        "Year",
-    ]
-    sheets = ["UPT", "VRM", "VRH", "VOMS"]
+    id_vars = conf["ID_COLUMNS"]
+    sheets = conf["SHEETS"]
     merged_df = None
     for df in dfs:
         if merged_df is None:
@@ -144,42 +122,109 @@ def save_data_to_intermediate_file(df, sheet_name, output_dir):
     df.to_parquet(output_path, index=False)
 
 
+# Define the SQLAlchemy base
+Base = declarative_base()
+
+mode_values = list(conf["MODE_MAPPING"].values()) + [
+    "Unknown",
+]
+tos_values = list(conf["TOS_MAPPING"].values()) + [
+    "Unknown",
+]
+
+
+# Define the ORM class representing the table
+class AgencyModeMonth(Base):
+    __tablename__ = "AgencyModeMonth"
+    NTD_ID = Column(String, primary_key=True)
+    Legacy_NTD_ID = Column(String, primary_key=True)
+    Agency = Column(String, primary_key=True)
+    Status = Column(Enum(*conf["STATUS"]), primary_key=True)
+    Reporter_Type = Column(Enum(*conf["REPORTER_TYPE"]), primary_key=True)
+    UZA = Column(Integer, primary_key=True)
+    UZA_Name = Column(String, primary_key=True)
+    Mode = Column(Enum(*mode_values), primary_key=True)
+    Type_Of_Service = Column(Enum(*tos_values), primary_key=True)
+    Month = Column(String, primary_key=True)
+    Year = Column(Integer, primary_key=True)
+    # The following columns are the values for each month
+    # UPT
+    Unlinked_Passenger_Trips = Column(Float)
+    # VRM
+    Vehicle_Revenue_Miles = Column(Float)
+    # VRH
+    Vehicle_Revenue_Hours = Column(Float)
+    # VOMS
+    Peak_Vehicles = Column(Float)
+
+
 @task
 def save_data_to_database(df, db_path):
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS AgencyModeMonth (
-            NTD_ID TEXT,
-            Legacy_NTD_ID TEXT,
-            Agency TEXT,
-            Status TEXT,
-            Reporter_Type TEXT,
-            UZA INTEGER,
-            UZA_Name TEXT,
-            Mode TEXT,
-            Type_Of_Service TEXT,
-            Month TEXT,
-            Year INTEGER,
-            Unlinked_Passenger_Trips REAL,
-            Vehicle_Revenue_Miles REAL,
-            Vehicle_Revenue_Hours REAL,
-            Peak_Vehicles REAL,
-            PRIMARY KEY (NTD_ID, Legacy_NTD_ID, Agency, Status, Reporter_Type, UZA, UZA_Name, Mode, Type_Of_Service, Month, Year)
-        );
-    """
-    )
-    # Update the table if
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
 
-    # records
-    records = df.to_records(index=False)
-    cursor.executemany(
-        "INSERT INTO AgencyModeMonth VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-        records,
-    )
-    conn.commit()
-    conn.close()
+    try:
+        chunk_size = conf["CHUNK_SIZE"]
+        total_rows = len(df)
+        total_chunks = math.ceil(total_rows / chunk_size)
+
+        for i in range(total_chunks):
+            start_idx = i * chunk_size
+            end_idx = (i + 1) * chunk_size
+            chunk_df = df[start_idx:end_idx]
+
+            for _, row in chunk_df.iterrows():
+                agency_mode_month = AgencyModeMonth(
+                    NTD_ID=row["ntd_id"],
+                    Legacy_NTD_ID=row["legacy_ntd_id"],
+                    Agency=row["agency"],
+                    Status=row["status"],
+                    Reporter_Type=row["reporter_type"],
+                    UZA=row["uza"],
+                    UZA_Name=row["uza_name"],
+                    Mode=row["mode"],
+                    Type_Of_Service=row["tos"],
+                    Month=row["month"],
+                    Year=row["year"],
+                    Unlinked_Passenger_Trips=row["UPT"],
+                    Vehicle_Revenue_Miles=row["VRM"],
+                    Vehicle_Revenue_Hours=row["VRM"],
+                    Peak_Vehicles=row["VOMS"],
+                )
+                session.add(agency_mode_month)
+
+            session.commit()
+
+        # for _, row in df.iterrows():
+        #     agency_mode_month = AgencyModeMonth(
+        #         NTD_ID=row["ntd_id"],
+        #         Legacy_NTD_ID=row["legacy_ntd_id"],
+        #         Agency=row["agency"],
+        #         Status=row["status"],
+        #         Reporter_Type=row["reporter_type"],
+        #         UZA=row["uza"],
+        #         UZA_Name=row["uza_name"],
+        #         Mode=row["mode"],
+        #         Type_Of_Service=row["tos"],
+        #         Month=row["month"],
+        #         Year=row["year"],
+        #         Unlinked_Passenger_Trips=row["UPT"],
+        #         Vehicle_Revenue_Miles=row["VRM"],
+        #         Vehicle_Revenue_Hours=row["VRH"],
+        #         Peak_Vehicles=row["VOMS"],
+        #     )
+        #     session.add(agency_mode_month)
+
+        session.commit()
+        print("Data saved to database successfully.")
+    except Exception as e:
+        session.rollback()
+        print("Error occurred while saving data to database.")
+        print(str(e))
+    finally:
+        session.close()
 
 
 # Create a temporary directory for intermediate files
@@ -200,18 +245,19 @@ with TemporaryDirectory() as temp_dir:
         xl = read_excel_workbook(file_path)
         # Transform and merge data
         dfs = []
-        for sheet_name in ["UPT", "VRM", "VRH", "VOMS"]:
+        for sheet_name in conf["SHEETS"]:
             df = read_sheet_and_transform(xl, sheet_name, sheet_name)
             dfs.append(df)
             save_data_to_intermediate_file(df, sheet_name, temp_dir)
 
         merged_df = merge_transformed_data(dfs)
-
+        # Write to a parquet file in PROCESSED: "data/processed"
+        # merged_df.to_parquet(
+        #     os.path.join(conf["DATA_DIR"]["PROCESSED"], "merged.parquet")
+        # )
         # Upload merged data to database
-        save_data_to_database(merged_df, "data/ntd.db")
+        save_data_to_database(merged_df, conf["DB_PATH"])
 
     # Run both subflows
-    file_path = scrape_download_flow(
-        url="https://www.transit.dot.gov/ntd/data-product/monthly-module-adjusted-data-release"
-    )
+    file_path = scrape_download_flow(url=conf["URL"])
     transform_merge_upload_flow(file_path)

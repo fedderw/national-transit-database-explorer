@@ -16,3 +16,4 @@ asyncio
 aiohttp
 pyarrow
 fastparquet
+tqdm

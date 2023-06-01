@@ -1,0 +1,140 @@
+# conf/main.yaml
+URL: "https://www.transit.dot.gov/ntd/data-product/monthly-module-adjusted-data-release"
+DOT_BASE_URL: "https://www.transit.dot.gov/"
+OUTPUT_DIR: "temp_dir"
+WB_OUTPUT_NAME: 'ntd.xlsx'
+DB_PATH: "data/ntd.db"
+CHUNK_SIZE: 1000
+DATA_DIR: 
+  RAW: "data/raw"
+  INTERIM: "data/interim"
+  PROCESSED: "data/processed"
+SHEETS: ["UPT", "VRM", "VRH", "VOMS"]
+VALUE_NAMES: ["UPT", "VRM", "VRH", "VOMS"]
+SHEET_NAME_UPT: "UPT"
+SHEET_NAME_VRM: "VRM"
+SHEET_NAME_VRH: "VRH"
+SHEET_NAME_VOMS: "VOMS"
+NUMERIC_STRING_COLUMNS:
+  - "ntd_id"
+  - "uza"
+CATEGORICAL_COLUMNS:
+  - "status"
+  - "reporter_type"
+  - "mode"
+  - "tos"
+ID_COLUMNS_MELT:
+  - "ntd_id"
+  - "legacy_ntd_id"
+  - "agency"
+  - "status"
+  - "reporter_type"
+  - "uza"
+  - "uza_name"
+  - "mode"
+  - "tos"
+ID_COLUMNS:
+  - "ntd_id"
+  - "legacy_ntd_id"
+  - "agency"
+  - "status"
+  - "reporter_type"
+  - "uza"
+  - "uza_name"
+  - "mode"
+  - "tos"
+  - "month"
+  - "year"
+MODE_MAPPING: 
+  AB: "Articulated Buses"
+  AO: "Automobiles"
+  AR: "Alaska Railroad"
+  BR: "Over-the-Road Buses"
+  BU: "Buses"
+  CC: "Cable Car"
+  MB: "Bus"
+  RB: "Bus Rapid Transit"
+  TR: "Aerial Tramway"
+  CR: "Commuter Rail"
+  LR: "Light Rail"
+  HR: "Heavy Rail"
+  DR: "Demand Response"
+  FB: "Ferryboat"
+  VP: "Vanpool"
+  EB: "Trolleybus or Electric Bus"
+  MO: "Monorail"
+  PT: "Paratransit"
+  JT: "Jitney"
+  PB: "Publico"
+  SR: "Streetcar"
+  TB: "Trolleybus"
+  CB: "Commuter Bus"
+  DT: "Demand Response Taxi"
+  DR: "Demand Response"
+  HM: "Hybrid Rail"
+  MG: "Monorail/Automated Guideway"
+  IP: "Inclined Plane"
+  IB: "Intercity Bus"
+MODE:
+  - "Articulated Buses"
+  - "Automobiles"
+  - "Alaska Railroad"
+  - "Over-the-Road Buses"
+  - "Buses"
+  - "Cable Car"
+  - "Bus"
+  - "Bus Rapid Transit"
+  - "Aerial Tramway"
+  - "Commuter Rail"
+  - "Light Rail"
+  - "Heavy Rail"
+  - "Demand Response"
+  - "Ferryboat"
+  - "Vanpool"
+  - "Trolleybus or Electric Bus"
+  - "Monorail"
+  - "Paratransit"
+  - "Jitney"
+  - "Publico"
+  - "Streetcar"
+  - "Trolleybus"
+  - "Commuter Bus"
+  - "Demand Response Taxi"
+  - "Demand Response"
+  - "Hybrid Rail"
+  - "Monorail/Automated Guideway"
+  - "Inclined Plane"
+  - "Intercity Bus"
+TOS_MAPPING:
+  DO: "Direct Operations"
+  PT: "Purchased Transportation"
+  TX: "Taxi"
+STATUS:
+  - 'Active'
+  - 'Inactive'
+  - nan
+REPORTER_TYPE:
+  - 'Full Reporter: Operating'
+  - 'Small Systems Reporter'
+  - 'Full Reporter: Operating/Building'
+  - 'Reduced Asset Reporter'
+  - 'Building Reporter'
+  - 'Separate Service'
+  - nan
+TOS:
+  - "Direct Operations"
+  - "Purchased Transportation"
+  - "Taxi"
+  - 'PT'
+  - 'TX'
+  - 'DO'
+  - 'TN'
+  - 'Total'
+  - 'Reduced Reporters'
+  - 'Subtotal with Reduced Reporters'
+  - 'Rural Reporters'
+  - 'Subtotal with Reduced and Rural Reporter Estimates'
+  - 'Rolling 12-Month Sum'
+  - 'Rolling 12-Month Sum with Reduced Reporters'
+  - 'Rolling 12-Month Sum with Reduced and Rural Reporter Estimates'
+  - nan

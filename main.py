@@ -96,11 +96,11 @@ def transform_data(df, value_name):
     )
     # Move value_name column to the end of the dataframe
     cols = list(long_data.columns.values)
-    print("cols: ", cols)
+    # print("cols: ", cols)
     cols.pop(cols.index(value_name))
     long_data = long_data[cols + [value_name]]
     # Show values of value_name column
-    print("value_name values: ", long_data[value_name].value_counts())
+    # print("value_name values: ", long_data[value_name].value_counts())
     # Ensure value_name column is the of type float
     long_data[value_name] = long_data[value_name].astype(float)
 
@@ -112,9 +112,9 @@ def transform_data(df, value_name):
     long_data["tos"] = long_data["tos"].fillna("Unknown")
     # Fill the missing values with "" for legacy ntd id
     long_data["legacy_ntd_id"] = long_data["legacy_ntd_id"].fillna("")
-    print("long_data shape: ", long_data.shape)
-    print("long_data columns: ", long_data.columns)
-    print("long_data dtypes: ", long_data.dtypes)
+    # print("long_data shape: ", long_data.shape)
+    # print("long_data columns: ", long_data.columns)
+    # print("long_data dtypes: ", long_data.dtypes)
     return long_data
 
 
@@ -127,6 +127,14 @@ def read_sheet_and_transform(xl, sheet_name, value_name):
 
 @task
 def merge_transformed_data(dfs):
+    """
+    The function merges a list of dataframes based on specified ID columns and returns the merged
+    dataframe.
+    
+    :param dfs: The parameter "dfs" is a list of dataframes that you want to merge together. Each
+    dataframe represents transformed data from different sources or sheets
+    :return: the merged dataframe.
+    """
     id_vars = conf["ID_COLUMNS"]
     sheets = conf["SHEETS"]
     merged_df = None
@@ -141,10 +149,6 @@ def merge_transformed_data(dfs):
 @task
 def save_data_to_intermediate_file(df, sheet_name, output_dir):
     output_path = os.path.join(output_dir, f"{sheet_name}.parquet")
-    print(f"Saving data to {output_path}")
-    print(f"Data shape: {df.shape}")
-    print(f"Data columns: {df.columns}")
-    print(f"Data dtypes: {df.dtypes}")
     df.to_parquet(output_path, index=False)
 
 
@@ -160,6 +164,8 @@ tos_values = list(conf["TOS_MAPPING"].values()) + [
 
 
 # Define the ORM class representing the table
+# The class "AgencyModeMonth" represents a table in a database that stores monthly data for different
+# agencies, modes, and types of service in the transportation industry.
 class AgencyModeMonth(Base):
     __tablename__ = "AgencyModeMonth"
     NTD_ID = Column(String, primary_key=True)
@@ -182,8 +188,7 @@ class AgencyModeMonth(Base):
     Vehicle_Revenue_Hours = Column(Float)
     # VOMS
     Peak_Vehicles = Column(Float)
-
-
+    
 @task
 def save_data_to_database(df, db_path):
     engine = create_engine(f"sqlite:///{db_path}")
@@ -196,7 +201,7 @@ def save_data_to_database(df, db_path):
         total_rows = len(df)
         total_chunks = math.ceil(total_rows / chunk_size)
 
-        for i in range(total_chunks):
+        for i in tqdm(range(total_chunks)):
             start_idx = i * chunk_size
             end_idx = (i + 1) * chunk_size
             chunk_df = df[start_idx:end_idx]
@@ -222,26 +227,6 @@ def save_data_to_database(df, db_path):
                 session.add(agency_mode_month)
 
             session.commit()
-
-        # for _, row in df.iterrows():
-        #     agency_mode_month = AgencyModeMonth(
-        #         NTD_ID=row["ntd_id"],
-        #         Legacy_NTD_ID=row["legacy_ntd_id"],
-        #         Agency=row["agency"],
-        #         Status=row["status"],
-        #         Reporter_Type=row["reporter_type"],
-        #         UACE_CD=row["uace_cd"],
-        #         UZA_Name=row["uza_name"],
-        #         Mode=row["mode"],
-        #         Type_Of_Service=row["tos"],
-        #         Month=row["month"],
-        #         Year=row["year"],
-        #         Unlinked_Passenger_Trips=row["UPT"],
-        #         Vehicle_Revenue_Miles=row["VRM"],
-        #         Vehicle_Revenue_Hours=row["VRH"],
-        #         Peak_Vehicles=row["VOMS"],
-        #     )
-        #     session.add(agency_mode_month)
 
         session.commit()
         print("Data saved to database successfully.")
@@ -277,10 +262,7 @@ with TemporaryDirectory() as temp_dir:
             save_data_to_intermediate_file(df, sheet_name, temp_dir)
 
         merged_df = merge_transformed_data(dfs)
-        # Write to a parquet file in PROCESSED: "data/processed"
-        # merged_df.to_parquet(
-        #     os.path.join(conf["DATA_DIR"]["PROCESSED"], "merged.parquet")
-        # )
+
         # Upload merged data to database
         save_data_to_database(merged_df, conf["DB_PATH"])
 

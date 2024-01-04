@@ -55,10 +55,24 @@ def read_sheet_from_excel(
     xl, sheet_name=conf["SHEET_NAME_UPT"], sheet_index=0
 ):
     df = xl[sheet_name].clean_names()
+    print("df columns: ", df.columns)
     return df
 
 
 def transform_data(df, value_name):
+    """
+    This function transforms the data in the dataframe 'df' according to the configuration 'conf'.
+    It first drops the rows with NaN values in the 'NUMERIC_STRING_COLUMNS', then converts these columns to integer type and formats them.
+    It then converts the 'CATEGORICAL_COLUMNS' to category type.
+    Finally, it reshapes the dataframe to long format and splits the 'Month/Year' column into separate 'month' and 'year' columns.
+
+    Parameters:
+    df (pandas.DataFrame): The input dataframe to be transformed.
+    value_name (str): The name to use for the value column when reshaping to long format.
+
+    Returns:
+    pandas.DataFrame: The transformed dataframe.
+    """
     # Use the conf instead of hardcoding the columns
     numeric_string_columns = conf["NUMERIC_STRING_COLUMNS"]
     df = df.dropna(subset=numeric_string_columns)
@@ -82,8 +96,13 @@ def transform_data(df, value_name):
     )
     # Move value_name column to the end of the dataframe
     cols = list(long_data.columns.values)
+    print("cols: ", cols)
     cols.pop(cols.index(value_name))
     long_data = long_data[cols + [value_name]]
+    # Show values of value_name column
+    print("value_name values: ", long_data[value_name].value_counts())
+    # Ensure value_name column is the of type float
+    long_data[value_name] = long_data[value_name].astype(float)
 
     long_data["mode"] = long_data["mode"].map(conf["MODE_MAPPING"])
     # Fill the missing values with "Unknown" for mode
@@ -93,6 +112,9 @@ def transform_data(df, value_name):
     long_data["tos"] = long_data["tos"].fillna("Unknown")
     # Fill the missing values with "" for legacy ntd id
     long_data["legacy_ntd_id"] = long_data["legacy_ntd_id"].fillna("")
+    print("long_data shape: ", long_data.shape)
+    print("long_data columns: ", long_data.columns)
+    print("long_data dtypes: ", long_data.dtypes)
     return long_data
 
 
@@ -119,6 +141,10 @@ def merge_transformed_data(dfs):
 @task
 def save_data_to_intermediate_file(df, sheet_name, output_dir):
     output_path = os.path.join(output_dir, f"{sheet_name}.parquet")
+    print(f"Saving data to {output_path}")
+    print(f"Data shape: {df.shape}")
+    print(f"Data columns: {df.columns}")
+    print(f"Data dtypes: {df.dtypes}")
     df.to_parquet(output_path, index=False)
 
 
@@ -141,7 +167,7 @@ class AgencyModeMonth(Base):
     Agency = Column(String, primary_key=True)
     Status = Column(Enum(*conf["STATUS"]), primary_key=True)
     Reporter_Type = Column(Enum(*conf["REPORTER_TYPE"]), primary_key=True)
-    UZA = Column(Integer, primary_key=True)
+    UACE_CD = Column(Integer, primary_key=True)
     UZA_Name = Column(String, primary_key=True)
     Mode = Column(Enum(*mode_values), primary_key=True)
     Type_Of_Service = Column(Enum(*tos_values), primary_key=True)
@@ -182,7 +208,7 @@ def save_data_to_database(df, db_path):
                     Agency=row["agency"],
                     Status=row["status"],
                     Reporter_Type=row["reporter_type"],
-                    UZA=row["uza"],
+                    UACE_CD=row["uace_cd"],
                     UZA_Name=row["uza_name"],
                     Mode=row["mode"],
                     Type_Of_Service=row["tos"],
@@ -204,7 +230,7 @@ def save_data_to_database(df, db_path):
         #         Agency=row["agency"],
         #         Status=row["status"],
         #         Reporter_Type=row["reporter_type"],
-        #         UZA=row["uza"],
+        #         UACE_CD=row["uace_cd"],
         #         UZA_Name=row["uza_name"],
         #         Mode=row["mode"],
         #         Type_Of_Service=row["tos"],

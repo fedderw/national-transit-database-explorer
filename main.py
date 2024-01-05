@@ -8,9 +8,10 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from prefect import Flow, task
-from sqlalchemy import create_engine, Column, Integer, String, Float, Enum
+from sqlalchemy import create_engine, Column, Integer, String, Float, Enum, Table, MetaData
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.ext.automap import automap_base
 import janitor
 from tqdm import tqdm
 import math
@@ -55,7 +56,7 @@ def read_sheet_from_excel(
     xl, sheet_name=conf["SHEET_NAME_UPT"], sheet_index=0
 ):
     df = xl[sheet_name].clean_names()
-    print("df columns: ", df.columns)
+    # print("df columns: ", df.columns)
     return df
 
 
@@ -76,11 +77,11 @@ def transform_data(df, value_name):
     # Use the conf instead of hardcoding the columns
     numeric_string_columns = conf["NUMERIC_STRING_COLUMNS"]
     df = df.dropna(subset=numeric_string_columns)
-    df[numeric_string_columns] = (
-        df[numeric_string_columns].astype(int).applymap("{:05d}".format)
+    df.loc[:,numeric_string_columns] = (
+        df[numeric_string_columns].astype(int).apply(lambda x: x.apply("{:05d}".format))
     )
     categorical_columns = conf["CATEGORICAL_COLUMNS"]
-    df[categorical_columns] = df[categorical_columns].astype("category")
+    df.loc[:,categorical_columns] = df[categorical_columns].astype("category")
     long_data = pd.melt(
         df,
         id_vars=conf["ID_COLUMNS_MELT"],
@@ -91,7 +92,7 @@ def transform_data(df, value_name):
         "_", expand=True
     )
     long_data = long_data.drop(columns="Month/Year")
-    long_data[["month", "year"]] = long_data[["month", "year"]].apply(
+    long_data.loc[:,["month", "year"]] = long_data[["month", "year"]].apply(
         lambda x: x.str.strip()
     )
     # Move value_name column to the end of the dataframe
@@ -102,16 +103,16 @@ def transform_data(df, value_name):
     # Show values of value_name column
     # print("value_name values: ", long_data[value_name].value_counts())
     # Ensure value_name column is the of type float
-    long_data[value_name] = long_data[value_name].astype(float)
+    long_data.loc[:,value_name] = long_data[value_name].astype(float)
 
-    long_data["mode"] = long_data["mode"].map(conf["MODE_MAPPING"])
+    long_data.loc[:,"mode"] = long_data["mode"].map(conf["MODE_MAPPING"])
     # Fill the missing values with "Unknown" for mode
-    long_data["mode"] = long_data["mode"].fillna("Unknown")
-    long_data["tos"] = long_data["tos"].map(conf["TOS_MAPPING"])
+    long_data.loc[:,"mode"] = long_data["mode"].fillna("Unknown")
+    long_data.loc[:,"tos"] = long_data["tos"].map(conf["TOS_MAPPING"])
     # Fill the missing values with "Unknown" for type of service
-    long_data["tos"] = long_data["tos"].fillna("Unknown")
+    long_data.loc[:,"tos"] = long_data["tos"].fillna("Unknown")
     # Fill the missing values with "" for legacy ntd id
-    long_data["legacy_ntd_id"] = long_data["legacy_ntd_id"].fillna("")
+    long_data.loc[:,"legacy_ntd_id"] = long_data["legacy_ntd_id"].fillna("")
     # print("long_data shape: ", long_data.shape)
     # print("long_data columns: ", long_data.columns)
     # print("long_data dtypes: ", long_data.dtypes)
@@ -168,74 +169,99 @@ tos_values = list(conf["TOS_MAPPING"].values()) + [
 # agencies, modes, and types of service in the transportation industry.
 class AgencyModeMonth(Base):
     __tablename__ = "AgencyModeMonth"
-    NTD_ID = Column(String, primary_key=True)
-    Legacy_NTD_ID = Column(String, primary_key=True)
-    Agency = Column(String, primary_key=True)
-    Status = Column(Enum(*conf["STATUS"]), primary_key=True)
-    Reporter_Type = Column(Enum(*conf["REPORTER_TYPE"]), primary_key=True)
-    UACE_CD = Column(Integer, primary_key=True)
-    UZA_Name = Column(String, primary_key=True)
-    Mode = Column(Enum(*mode_values), primary_key=True)
-    Type_Of_Service = Column(Enum(*tos_values), primary_key=True)
-    Month = Column(String, primary_key=True)
-    Year = Column(Integer, primary_key=True)
+    ntd_id = Column(Integer, primary_key=True)
+    # legacy_ntd_id = Column(String, primary_key=True)
+    agency = Column(String, primary_key=True)
+    status = Column(Enum(*conf["STATUS"]), primary_key=True)
+    reporter_type = Column(Enum(*conf["REPORTER_TYPE"]), primary_key=True)
+    uace_cd = Column(Integer, primary_key=True)
+    uza_name = Column(String, primary_key=True)
+    mode = Column(Enum(*mode_values), primary_key=True)
+    tos = Column(Enum(*tos_values), primary_key=True)
+    month = Column(Integer, primary_key=True)
+    year = Column(Integer, primary_key=True)
     # The following columns are the values for each month
     # UPT Unlinked_Passenger_Trips
-    Unlinked_Passenger_Trips = Column(Float)
+    UPT = Column(Float)
     # VRM Vehicle_Revenue_Miles
-    Vehicle_Revenue_Miles = Column(Float)
+    VRM = Column(Float)
     # VRH Vehicle_Revenue_Hours
-    Vehicle_Revenue_Hours = Column(Float)
+    VRH = Column(Float)
     # VOMS Peak_Vehicles
-    Peak_Vehicles = Column(Float)
+    VOMS = Column(Float)
     
 @task
 def save_data_to_database(df, db_path):
     engine = create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
-    session = Session()
 
     try:
-        chunk_size = conf["CHUNK_SIZE"]
-        total_rows = len(df)
-        total_chunks = math.ceil(total_rows / chunk_size)
+        # Convert DataFrame to a list of dictionaries
+        data = df.to_dict(orient='records')
 
-        for i in tqdm(range(total_chunks)):
-            start_idx = i * chunk_size
-            end_idx = (i + 1) * chunk_size
-            chunk_df = df[start_idx:end_idx]
-
-            for _, row in chunk_df.iterrows():
-                agency_mode_month = AgencyModeMonth(
-                    NTD_ID=row["ntd_id"],
-                    Legacy_NTD_ID=row["legacy_ntd_id"],
-                    Agency=row["agency"],
-                    Status=row["status"],
-                    Reporter_Type=row["reporter_type"],
-                    UACE_CD=row["uace_cd"],
-                    UZA_Name=row["uza_name"],
-                    Mode=row["mode"],
-                    Type_Of_Service=row["tos"],
-                    Month=row["month"],
-                    Year=row["year"],
-                    Unlinked_Passenger_Trips=row["UPT"],
-                    Vehicle_Revenue_Miles=row["VRM"],
-                    Vehicle_Revenue_Hours=row["VRM"],
-                    Peak_Vehicles=row["VOMS"],
-                )
-                session.add(agency_mode_month)
-
+        with Session() as session:
+            session.bulk_insert_mappings(AgencyModeMonth, data)
             session.commit()
-
-        session.commit()
         print("Data saved to database successfully.")
     except Exception as e:
-        session.rollback()
         print("Error occurred while saving data to database.")
         print(str(e))
-    finally:
-        session.close()
+
+@task
+def transform_to_star_schema(db_path):
+    # Create an engine and connect to the database
+    engine = create_engine(f'sqlite:///{db_path}')
+    metadata = MetaData()
+    metadata.reflect(engine)
+    Base = automap_base(metadata=metadata)
+    Base.prepare()
+
+    # Load the data from the AgencyModeMonth table into a DataFrame
+    with Session(engine) as session:
+        AgencyModeMonth = Base.classes.AgencyModeMonth
+        query = session.query(AgencyModeMonth)
+        df = pd.read_sql(query.statement, session.bind)
+
+    # Creating separate tables for dimensions
+    agency_table = df[['agency']].drop_duplicates().reset_index(drop=True)
+    agency_table['agency_id'] = agency_table.index + 1
+
+    status_table = df[['status']].drop_duplicates().reset_index(drop=True)
+    status_table['status_id'] = status_table.index + 1
+
+    reporter_table = df[['reporter_type']].drop_duplicates().reset_index(drop=True)
+    reporter_table['reporter_id'] = reporter_table.index + 1
+
+    uza_table = df[['uace_cd', 'uza_name']].drop_duplicates().reset_index(drop=True)
+    uza_table['uza_id'] = uza_table.index + 1
+
+    mode_table = df[['mode']].drop_duplicates().reset_index(drop=True)
+    mode_table['mode_id'] = mode_table.index + 1
+
+    tos_table = df[['tos']].drop_duplicates().reset_index(drop=True)
+    tos_table['tos_id'] = tos_table.index + 1
+
+    # Creating the fact table
+    fact_table = df.merge(agency_table, on='agency', how='left') \
+                   .merge(status_table, on='status', how='left') \
+                   .merge(reporter_table, on='reporter_type', how='left') \
+                   .merge(uza_table, on=['uace_cd', 'uza_name'], how='left') \
+                   .merge(mode_table, on='mode', how='left') \
+                   .merge(tos_table, on='tos', how='left')
+
+    # Selecting required columns and renaming them
+    fact_table = fact_table[['agency_id', 'status_id', 'reporter_id', 'uza_id', 'mode_id', 'tos_id', 'month', 'year', 'UPT', 'VRM', 'VRH', 'VOMS']]
+
+    # Saving the transformed tables back to SQLite using SQLAlchemy
+    with engine.begin() as connection:
+        agency_table.to_sql('agency', connection, if_exists='replace', index=False)
+        status_table.to_sql('status', connection, if_exists='replace', index=False)
+        reporter_table.to_sql('reporter', connection, if_exists='replace', index=False)
+        uza_table.to_sql('uza', connection, if_exists='replace', index=False)
+        mode_table.to_sql('mode', connection, if_exists='replace', index=False)
+        tos_table.to_sql('tos', connection, if_exists='replace', index=False)
+        fact_table.to_sql('AgencyModeMonth', connection, if_exists='replace', index=False)
 
 
 # Create a temporary directory for intermediate files
@@ -265,6 +291,8 @@ with TemporaryDirectory() as temp_dir:
 
         # Upload merged data to database
         save_data_to_database(merged_df, conf["DB_PATH"])
+        # Transform data to star schema
+        transform_to_star_schema(conf["DB_PATH"])
 
     # Run both subflows
     file_path = scrape_download_flow(url=conf["URL"])

@@ -8,10 +8,29 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from prefect import Flow, task
-from sqlalchemy import create_engine, Column, Integer, String, Float, Enum, Table, MetaData
+from sqlalchemy import (
+    create_engine,
+    Column,
+    Integer,
+    String,
+    Float,
+    Enum,
+    Table,
+    MetaData,
+)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.ext.automap import automap_base
+from database_models import (
+    Base,
+    Agency,
+    Status,
+    ReporterType,
+    UrbanizedArea,
+    Mode,
+    TypeOfService,
+    AgencyModeMonth,
+)
 import janitor
 from tqdm import tqdm
 import math
@@ -77,11 +96,13 @@ def transform_data(df, value_name):
     # Use the conf instead of hardcoding the columns
     numeric_string_columns = conf["NUMERIC_STRING_COLUMNS"]
     df = df.dropna(subset=numeric_string_columns)
-    df.loc[:,numeric_string_columns] = (
-        df[numeric_string_columns].astype(int).apply(lambda x: x.apply("{:05d}".format))
+    df.loc[:, numeric_string_columns] = (
+        df[numeric_string_columns]
+        .astype(int)
+        .apply(lambda x: x.apply("{:05d}".format))
     )
     categorical_columns = conf["CATEGORICAL_COLUMNS"]
-    df.loc[:,categorical_columns] = df[categorical_columns].astype("category")
+    df.loc[:, categorical_columns] = df[categorical_columns].astype("category")
     long_data = pd.melt(
         df,
         id_vars=conf["ID_COLUMNS_MELT"],
@@ -92,7 +113,7 @@ def transform_data(df, value_name):
         "_", expand=True
     )
     long_data = long_data.drop(columns="Month/Year")
-    long_data.loc[:,["month", "year"]] = long_data[["month", "year"]].apply(
+    long_data.loc[:, ["month", "year"]] = long_data[["month", "year"]].apply(
         lambda x: x.str.strip()
     )
     # Move value_name column to the end of the dataframe
@@ -103,16 +124,18 @@ def transform_data(df, value_name):
     # Show values of value_name column
     # print("value_name values: ", long_data[value_name].value_counts())
     # Ensure value_name column is the of type float
-    long_data.loc[:,value_name] = long_data[value_name].astype(float)
+    long_data.loc[:, value_name] = long_data[value_name].astype(float)
 
-    long_data.loc[:,"mode"] = long_data["mode"].map(conf["MODE_MAPPING"])
+    long_data.loc[:, "mode"] = long_data["mode"].map(conf["MODE_MAPPING"])
     # Fill the missing values with "Unknown" for mode
-    long_data.loc[:,"mode"] = long_data["mode"].fillna("Unknown")
-    long_data.loc[:,"tos"] = long_data["tos"].map(conf["TOS_MAPPING"])
+    long_data.loc[:, "mode"] = long_data["mode"].fillna("Unknown")
+    long_data.loc[:, "tos"] = long_data["tos"].map(conf["TOS_MAPPING"])
     # Fill the missing values with "Unknown" for type of service
-    long_data.loc[:,"tos"] = long_data["tos"].fillna("Unknown")
+    long_data.loc[:, "tos"] = long_data["tos"].fillna("Unknown")
     # Fill the missing values with "" for legacy ntd id
-    long_data.loc[:,"legacy_ntd_id"] = long_data["legacy_ntd_id"].fillna("")
+    long_data.loc[:, "legacy_ntd_id"] = long_data["legacy_ntd_id"].fillna("")
+    # Drop legacy ntd id column
+    # long_data = long_data.drop(columns="legacy_ntd_id")
     # print("long_data shape: ", long_data.shape)
     # print("long_data columns: ", long_data.columns)
     # print("long_data dtypes: ", long_data.dtypes)
@@ -131,7 +154,7 @@ def merge_transformed_data(dfs):
     """
     The function merges a list of dataframes based on specified ID columns and returns the merged
     dataframe.
-    
+
     :param dfs: The parameter "dfs" is a list of dataframes that you want to merge together. Each
     dataframe represents transformed data from different sources or sheets
     :return: the merged dataframe.
@@ -153,115 +176,112 @@ def save_data_to_intermediate_file(df, sheet_name, output_dir):
     df.to_parquet(output_path, index=False)
 
 
-# Define the SQLAlchemy base
-Base = declarative_base()
-
-mode_values = list(conf["MODE_MAPPING"].values()) + [
-    "Unknown",
-]
-tos_values = list(conf["TOS_MAPPING"].values()) + [
-    "Unknown",
-]
-
-
-# Define the ORM class representing the table
-# The class "AgencyModeMonth" represents a table in a database that stores monthly data for different
-# agencies, modes, and types of service in the transportation industry.
-class AgencyModeMonth(Base):
-    __tablename__ = "AgencyModeMonth"
-    ntd_id = Column(Integer, primary_key=True)
-    # legacy_ntd_id = Column(String, primary_key=True)
-    agency = Column(String, primary_key=True)
-    status = Column(Enum(*conf["STATUS"]), primary_key=True)
-    reporter_type = Column(Enum(*conf["REPORTER_TYPE"]), primary_key=True)
-    uace_cd = Column(Integer, primary_key=True)
-    uza_name = Column(String, primary_key=True)
-    mode = Column(Enum(*mode_values), primary_key=True)
-    tos = Column(Enum(*tos_values), primary_key=True)
-    month = Column(Integer, primary_key=True)
-    year = Column(Integer, primary_key=True)
-    # The following columns are the values for each month
-    # UPT Unlinked_Passenger_Trips
-    UPT = Column(Float)
-    # VRM Vehicle_Revenue_Miles
-    VRM = Column(Float)
-    # VRH Vehicle_Revenue_Hours
-    VRH = Column(Float)
-    # VOMS Peak_Vehicles
-    VOMS = Column(Float)
-    
 @task
-def save_data_to_database(df, db_path):
+def create_and_populate_database(df, db_path):
+    """
+    This function creates the database and populates the dimension tables and fact table.
+    """
     engine = create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
 
-    try:
-        # Convert DataFrame to a list of dictionaries
-        data = df.to_dict(orient='records')
+    with Session() as session:
+        # Populate dimension tables and create a mapping for foreign keys
+        agency_mapping = {}
+        for ntd_id, agency_name in (
+            df[["ntd_id", "agency"]].drop_duplicates().itertuples(index=False)
+        ):
+            agency_obj = Agency(ntd_id=ntd_id, agency_name=agency_name)
+            session.add(agency_obj)
+            agency_mapping[agency_name] = ntd_id
 
-        with Session() as session:
-            session.bulk_insert_mappings(AgencyModeMonth, data)
-            session.commit()
-        print("Data saved to database successfully.")
-    except Exception as e:
-        print("Error occurred while saving data to database.")
-        print(str(e))
+        status_mapping = {}
+        for status in df["status"].unique():
+            status_obj = Status(status=status)
+            session.add(status_obj)
+            session.flush()  # To get the generated ID
+            status_mapping[status] = status_obj.status_id
 
-@task
-def transform_to_star_schema(db_path):
-    # Create an engine and connect to the database
-    engine = create_engine(f'sqlite:///{db_path}')
-    metadata = MetaData()
-    metadata.reflect(engine)
-    Base = automap_base(metadata=metadata)
-    Base.prepare()
+        reporter_mapping = {}
+        for reporter_type in df["reporter_type"].unique():
+            reporter_obj = ReporterType(reporter_type=reporter_type)
+            session.add(reporter_obj)
+            session.flush()  # To get the generated ID
+            reporter_mapping[reporter_type] = reporter_obj.reporter_id
 
-    # Load the data from the AgencyModeMonth table into a DataFrame
-    with Session(engine) as session:
-        AgencyModeMonth = Base.classes.AgencyModeMonth
-        query = session.query(AgencyModeMonth)
-        df = pd.read_sql(query.statement, session.bind)
+        uza_mapping = {}
+        for uace_cd, uza_name in (
+            df[["uace_cd", "uza_name"]]
+            .drop_duplicates()
+            .itertuples(index=False)
+        ):
+            uza_obj = UrbanizedArea(uace_cd=uace_cd, uza_name=uza_name)
+            session.add(uza_obj)
+            uza_mapping[
+                uace_cd
+            ] = uace_cd  # uace_cd is the primary key and uza_id
 
-    # Creating separate tables for dimensions
-    agency_table = df[['agency']].drop_duplicates().reset_index(drop=True)
-    agency_table['agency_id'] = agency_table.index + 1
+        mode_mapping = {}
+        for mode in df["mode"].unique():
+            mode_obj = Mode(mode=mode)
+            session.add(mode_obj)
+            session.flush()  # To get the generated ID
+            mode_mapping[mode] = mode_obj.mode_id
 
-    status_table = df[['status']].drop_duplicates().reset_index(drop=True)
-    status_table['status_id'] = status_table.index + 1
+        tos_mapping = {}
+        for tos in df["tos"].unique():
+            tos_obj = TypeOfService(tos=tos)
+            session.add(tos_obj)
+            session.flush()  # To get the generated ID
+            tos_mapping[tos] = tos_obj.tos_id
+        print("Committing dimension tables to database...")
+        session.commit()
+        print("Dimension tables committed to database.")
+        # Make sure we're only using the columns we need
+        df = df[
+            [
+                "ntd_id",
+                "status",
+                "reporter_type",
+                "uace_cd",
+                "mode",
+                "tos",
+                "month",
+                "year",
+                "UPT",
+                "VRM",
+                "VRH",
+                "VOMS",
+            ]
+        ]
 
-    reporter_table = df[['reporter_type']].drop_duplicates().reset_index(drop=True)
-    reporter_table['reporter_id'] = reporter_table.index + 1
+        # Insert data into fact table
+        print("Inserting records into fact table...")
+        fact_table_data = []
 
-    uza_table = df[['uace_cd', 'uza_name']].drop_duplicates().reset_index(drop=True)
-    uza_table['uza_id'] = uza_table.index + 1
+        for record in tqdm(df.to_dict(orient="records")):
+            try:
+                record["status_id"] = status_mapping[record["status"]]
+                record["reporter_id"] = reporter_mapping[
+                    record["reporter_type"]
+                ]
+                record["mode_id"] = mode_mapping[record["mode"]]
+                record["tos_id"] = tos_mapping[record["tos"]]
+                del record["status"]
+                del record["reporter_type"]
+                del record["mode"]
+                del record["tos"]
+                fact_table_data.append(record)
+            except Exception as e:
+                print(e)
+                print(record)
+                raise e
 
-    mode_table = df[['mode']].drop_duplicates().reset_index(drop=True)
-    mode_table['mode_id'] = mode_table.index + 1
-
-    tos_table = df[['tos']].drop_duplicates().reset_index(drop=True)
-    tos_table['tos_id'] = tos_table.index + 1
-
-    # Creating the fact table
-    fact_table = df.merge(agency_table, on='agency', how='left') \
-                   .merge(status_table, on='status', how='left') \
-                   .merge(reporter_table, on='reporter_type', how='left') \
-                   .merge(uza_table, on=['uace_cd', 'uza_name'], how='left') \
-                   .merge(mode_table, on='mode', how='left') \
-                   .merge(tos_table, on='tos', how='left')
-
-    # Selecting required columns and renaming them
-    fact_table = fact_table[['agency_id', 'status_id', 'reporter_id', 'uza_id', 'mode_id', 'tos_id', 'month', 'year', 'UPT', 'VRM', 'VRH', 'VOMS']]
-
-    # Saving the transformed tables back to SQLite using SQLAlchemy
-    with engine.begin() as connection:
-        agency_table.to_sql('agency', connection, if_exists='replace', index=False)
-        status_table.to_sql('status', connection, if_exists='replace', index=False)
-        reporter_table.to_sql('reporter', connection, if_exists='replace', index=False)
-        uza_table.to_sql('uza', connection, if_exists='replace', index=False)
-        mode_table.to_sql('mode', connection, if_exists='replace', index=False)
-        tos_table.to_sql('tos', connection, if_exists='replace', index=False)
-        fact_table.to_sql('AgencyModeMonth', connection, if_exists='replace', index=False)
+        # Batch insert into fact table
+        session.bulk_insert_mappings(AgencyModeMonth, fact_table_data)
+        print("Committing records to database...")
+        session.commit()
+        print("Records committed to database.")
 
 
 # Create a temporary directory for intermediate files
@@ -290,9 +310,7 @@ with TemporaryDirectory() as temp_dir:
         merged_df = merge_transformed_data(dfs)
 
         # Upload merged data to database
-        save_data_to_database(merged_df, conf["DB_PATH"])
-        # Transform data to star schema
-        transform_to_star_schema(conf["DB_PATH"])
+        create_and_populate_database(merged_df, conf["DB_PATH"])
 
     # Run both subflows
     file_path = scrape_download_flow(url=conf["URL"])

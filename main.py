@@ -180,13 +180,13 @@ class AgencyModeMonth(Base):
     Month = Column(String, primary_key=True)
     Year = Column(Integer, primary_key=True)
     # The following columns are the values for each month
-    # UPT
+    # UPT Unlinked_Passenger_Trips
     Unlinked_Passenger_Trips = Column(Float)
-    # VRM
+    # VRM Vehicle_Revenue_Miles
     Vehicle_Revenue_Miles = Column(Float)
-    # VRH
+    # VRH Vehicle_Revenue_Hours
     Vehicle_Revenue_Hours = Column(Float)
-    # VOMS
+    # VOMS Peak_Vehicles
     Peak_Vehicles = Column(Float)
     
 @task

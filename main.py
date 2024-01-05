@@ -168,26 +168,26 @@ tos_values = list(conf["TOS_MAPPING"].values()) + [
 # agencies, modes, and types of service in the transportation industry.
 class AgencyModeMonth(Base):
     __tablename__ = "AgencyModeMonth"
-    NTD_ID = Column(String, primary_key=True)
-    Legacy_NTD_ID = Column(String, primary_key=True)
-    Agency = Column(String, primary_key=True)
-    Status = Column(Enum(*conf["STATUS"]), primary_key=True)
-    Reporter_Type = Column(Enum(*conf["REPORTER_TYPE"]), primary_key=True)
-    UACE_CD = Column(Integer, primary_key=True)
-    UZA_Name = Column(String, primary_key=True)
-    Mode = Column(Enum(*mode_values), primary_key=True)
-    Type_Of_Service = Column(Enum(*tos_values), primary_key=True)
-    Month = Column(String, primary_key=True)
-    Year = Column(Integer, primary_key=True)
+    ntd_id = Column(Integer, primary_key=True)
+    legacy_ntd_id = Column(Integer, primary_key=True)
+    agency = Column(String, primary_key=True)
+    status = Column(Enum(*conf["STATUS"]), primary_key=True)
+    reporter_type = Column(Enum(*conf["REPORTER_TYPE"]), primary_key=True)
+    uace_cd = Column(Integer, primary_key=True)
+    uza_name = Column(String, primary_key=True)
+    mode = Column(Enum(*mode_values), primary_key=True)
+    tos = Column(Enum(*tos_values), primary_key=True)
+    month = Column(Integer, primary_key=True)
+    year = Column(Integer, primary_key=True)
     # The following columns are the values for each month
     # UPT Unlinked_Passenger_Trips
-    Unlinked_Passenger_Trips = Column(Float)
+    UPT = Column(Float)
     # VRM Vehicle_Revenue_Miles
-    Vehicle_Revenue_Miles = Column(Float)
+    VRM = Column(Float)
     # VRH Vehicle_Revenue_Hours
-    Vehicle_Revenue_Hours = Column(Float)
+    VRH = Column(Float)
     # VOMS Peak_Vehicles
-    Peak_Vehicles = Column(Float)
+    VOMS = Column(Float)
     
 @task
 def save_data_to_database(df, db_path):
@@ -221,7 +221,7 @@ def save_data_to_database(df, db_path):
                     Year=row["year"],
                     Unlinked_Passenger_Trips=row["UPT"],
                     Vehicle_Revenue_Miles=row["VRM"],
-                    Vehicle_Revenue_Hours=row["VRM"],
+                    Vehicle_Revenue_Hours=row["VRH"],
                     Peak_Vehicles=row["VOMS"],
                 )
                 session.add(agency_mode_month)

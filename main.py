@@ -8,9 +8,10 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from prefect import Flow, task
-from sqlalchemy import create_engine, Column, Integer, String, Float, Enum
+from sqlalchemy import create_engine, Column, Integer, String, Float, Enum, Table, MetaData
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.ext.automap import automap_base
 import janitor
 from tqdm import tqdm
 import math
@@ -55,7 +56,7 @@ def read_sheet_from_excel(
     xl, sheet_name=conf["SHEET_NAME_UPT"], sheet_index=0
 ):
     df = xl[sheet_name].clean_names()
-    print("df columns: ", df.columns)
+    # print("df columns: ", df.columns)
     return df
 
 
@@ -77,7 +78,7 @@ def transform_data(df, value_name):
     numeric_string_columns = conf["NUMERIC_STRING_COLUMNS"]
     df = df.dropna(subset=numeric_string_columns)
     df.loc[:,numeric_string_columns] = (
-        df[numeric_string_columns].astype(int).applymap("{:05d}".format)
+        df[numeric_string_columns].astype(int).apply(lambda x: x.apply("{:05d}".format))
     )
     categorical_columns = conf["CATEGORICAL_COLUMNS"]
     df.loc[:,categorical_columns] = df[categorical_columns].astype("category")
@@ -209,11 +210,19 @@ def save_data_to_database(df, db_path):
 
 @task
 def transform_to_star_schema(db_path):
-    # Connect to SQLite database
-    conn = sqlite3.connect(db_path)
+    # Create an engine and connect to the database
+    engine = create_engine(f'sqlite:///{db_path}')
+    metadata = MetaData()
+    metadata.reflect(engine)
+    Base = automap_base(metadata=metadata)
+    Base.prepare()
 
-    # Load the data from SQLite table into a DataFrame
-    df = pd.read_sql_query("SELECT * FROM AgencyModeMonth", conn)
+    # Load the data from the AgencyModeMonth table into a DataFrame
+    with Session(engine) as session:
+        AgencyModeMonth = Base.classes.AgencyModeMonth
+        query = session.query(AgencyModeMonth)
+        df = pd.read_sql(query.statement, session.bind)
+
     # Creating separate tables for dimensions
     agency_table = df[['agency']].drop_duplicates().reset_index(drop=True)
     agency_table['agency_id'] = agency_table.index + 1
@@ -242,20 +251,18 @@ def transform_to_star_schema(db_path):
                    .merge(tos_table, on='tos', how='left')
 
     # Selecting required columns and renaming them
-    # Adjusted column selection to match the available columns in df
     fact_table = fact_table[['agency_id', 'status_id', 'reporter_id', 'uza_id', 'mode_id', 'tos_id', 'month', 'year', 'UPT', 'VRM', 'VRH', 'VOMS']]
 
-    # Saving the transformed tables back to SQLite
-    agency_table.to_sql('agency', conn, if_exists='replace', index=False)
-    status_table.to_sql('status', conn, if_exists='replace', index=False)
-    reporter_table.to_sql('reporter', conn, if_exists='replace', index=False)
-    uza_table.to_sql('uza', conn, if_exists='replace', index=False)
-    mode_table.to_sql('mode', conn, if_exists='replace', index=False)
-    tos_table.to_sql('tos', conn, if_exists='replace', index=False)
-    fact_table.to_sql('AgencyModeMonth', conn, if_exists='replace', index=False)
+    # Saving the transformed tables back to SQLite using SQLAlchemy
+    with engine.begin() as connection:
+        agency_table.to_sql('agency', connection, if_exists='replace', index=False)
+        status_table.to_sql('status', connection, if_exists='replace', index=False)
+        reporter_table.to_sql('reporter', connection, if_exists='replace', index=False)
+        uza_table.to_sql('uza', connection, if_exists='replace', index=False)
+        mode_table.to_sql('mode', connection, if_exists='replace', index=False)
+        tos_table.to_sql('tos', connection, if_exists='replace', index=False)
+        fact_table.to_sql('AgencyModeMonth', connection, if_exists='replace', index=False)
 
-    # Close the database connection
-    conn.close()
 
 # Create a temporary directory for intermediate files
 with TemporaryDirectory() as temp_dir:

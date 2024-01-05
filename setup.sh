@@ -15,8 +15,5 @@ mkdir data
 # Change directory to 'data'
 cd data
 
-# Create the 'ntd.db' SQLite database
-touch ntd.db
-
 # Print setup completed message
 echo "Setup completed successfully. You can now run the main.py file."

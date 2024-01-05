@@ -1,4 +1,6 @@
-# Pipeline overview
+# Project overview
+This is a pipeline that scrapes the url for the most recent National Transit Database excel workbook, and transforms it into a local sqlite database
+
 ## Libraries Used
 - os
 - re

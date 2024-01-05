@@ -257,24 +257,28 @@ def create_and_populate_database(df, db_path):
 
         # Insert data into fact table
         print("Inserting records into fact table...")
+        fact_table_data = []
+
         for record in tqdm(df.to_dict(orient="records")):
-            # record['ntd_id'] = agency_mapping[record['agency']]
             try:
                 record["status_id"] = status_mapping[record["status"]]
-                record["reporter_id"] = reporter_mapping[record["reporter_type"]]
-                # record['uace_cd'] = uza_mapping[record['uace_cd']]  # uace_cd is both the key and the value
+                record["reporter_id"] = reporter_mapping[
+                    record["reporter_type"]
+                ]
                 record["mode_id"] = mode_mapping[record["mode"]]
                 record["tos_id"] = tos_mapping[record["tos"]]
-                # Now that we have the foreign keys, we can drop the original columns
                 del record["status"]
                 del record["reporter_type"]
                 del record["mode"]
                 del record["tos"]
-                session.add(AgencyModeMonth(**record))
+                fact_table_data.append(record)
             except Exception as e:
                 print(e)
                 print(record)
                 raise e
+
+        # Batch insert into fact table
+        session.bulk_insert_mappings(AgencyModeMonth, fact_table_data)
         print("Committing records to database...")
         session.commit()
         print("Records committed to database.")
